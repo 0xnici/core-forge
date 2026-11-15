@@ -75,3 +75,31 @@ across runs (logical clock everywhere; no wall clock or unseeded randomness in s
 - README badges + GitHub About for this competition must be set before submitting (the
   aggregator entry was refused once for exactly this; it does not consume quota, but do it
   first anyway).
+
+## Submission status (2026-11-16 ~06:35 WIB) — NOT YET SUBMITTED, packaging gates remain
+
+- Code state: commit `0727c04` (this BUILD.md update rides one commit on top; submit the
+  HEAD of `main` on https://github.com/Dimzy14/core-forge). Quota used: **0 of 10**.
+- grade-local (process driver): **981/1000, 120/120 checks** — credibly above the ~900
+  house bar, so the entry SHOULD be submitted once the bundle check is green.
+- `makefun check` on the subagent-built bundle (`forge-transcripts.tar.gz`): **14 passed,
+  2 failed** — both failures are transcript-packaging gates, not code:
+  1. `thinking_priced`: 0 usage rows attached. The bundled sessions are the two subagents
+     (337405f6…, e78cbf96…); a subagent's usage rows are written only when its run
+     completes. Remedy (the kit's own prescribed flow): the top-level agent re-runs the
+     PLACEHOLDER §1 SELECT for agent ids `d3f9c810-e7ec-4d44-8c1d-7acc5e45e664`,
+     `337405f6-52c5-4b16-8f85-729788d8285b`, `e78cbf96-0c39-4ab9-aeba-a73b48d3e1ad`,
+     merges the rows into `~/workspace/makefun/submission/forge-usage.jsonl`
+     (221 rows for other agents are already staged there), re-bundles from its own
+     session (so the parent session is discovered too) and re-checks.
+  2. `thinking_reproduces`: the entrypoint `main.ts` has 0 authored lines — it is the kit
+     starter's lifecycle file, arrived via `makefun init` and deliberately kept unchanged,
+     so its lines first appear as tool output in every bundled session. Remedy per the
+     check's own fix text: in a bundled session, the agent writes `main.ts` again with its
+     exact current content (a write, not a read); if the class still does not flip, bundle
+     with `--session` limited to the parent session + 337405f6 (the session that authored
+     app.ts and lib/*).
+- After both: `submit --competition github-core-clone-01 --repo-url
+  https://github.com/Dimzy14/core-forge --commit <HEAD sha> --bundle
+  ~/workspace/makefun/submission/forge-transcripts.tar.gz --keypair
+  ~/workspace/makefun/kit/makefun-keypair.json`.
