@@ -18,41 +18,53 @@ reference's medians: 200 pushes of 1 KiB, 50 concurrent depth-1 clones of a 200-
   token), owner mismatch = 404, malformed JSON = 400, unknown route = JSON 404,
   X-GitHub-Request-Id on every reply.
 
-## Next phases, in order
+## Build completed (2026-11-16, second session)
 
-1. **Git object layer** (`lib/git.ts`): loose objects + pack read/write (zlib via node:zlib),
-   tree/commit parsing, ref advertisement. Smart HTTP: `/{owner}/{repo}.git/info/refs`,
-   upload-pack protocol v2 (ls-refs, fetch with shallow depth=1) and v0 fallback with
-   side-band-64k, receive-pack v0 (report-status, delete-refs, fast-forward-only with per-ref
-   `ng non-fast-forward`). The clone workload (50 concurrent depth-1) makes pack generation
-   the performance-critical path: cache packs per (tip, depth) — a shallow clone of an
-   unchanged tip is the same bytes every time.
-2. **GraphQL v4** (`lib/graphql.ts`): a small executor over the store for the documents gh and
-   github-mcp-server send — viewer, repository (issue/issues with orderBy CREATED_AT DESC and
-   states filter, pullRequest/pullRequests), createPullRequest mutation, introspection for
-   Issue/PullRequest/Repository/SearchType, batched operations, unknown-field errors array,
-   unknown repository = data.repository null.
-3. **MCP** (`lib/mcp.ts`): streamable HTTP JSON-RPC; server/discover (revision 2026-07-28) or
-   initialize handshake; the six tools (create_repo, get_repo, create_issue, list_issues,
-   create_pull_request, merge_pull_request) acting on the same store; byte-identical
-   tools/list; -32602/-32601/-32700 semantics; 3 s per request.
-4. **Performance pass**: keep-alive issue reads are a Map lookup + JSON — keep bodies small and
-   pre-shaped; issue writes append-only; pushes: receive-pack must apply 1 KiB changes without
-   rewriting history (append the object, move the ref).
+All four phases below are DONE and verified end to end:
 
-## Open questions to settle with grade-local against the practice trials
+- **Git layer** (`lib/git.ts` + `lib/git-http.ts`): real nested git objects and packfiles
+  (plain packs out; OFS_DELTA/REF_DELTA + thin-pack bases resolved on the way in; the zlib
+  stream length is found by binary search because Node 24's sync zlib does not report input
+  consumption). Smart HTTP: v2 advertisement + ls-refs (strict prefix filtering, unborn HEAD)
+  + fetch (held-set closure with shallow-edge cuts, generation-depth shallowing, ACK/NAK,
+  acknowledgments only when the client did not send `done`), v0 fetch fallback, receive-pack
+  with per-ref fast-forward enforcement (`ng … non-fast-forward`), create/delete refs.
+  Verified against the real git 2.43 client: push (create/FF/delete/non-FF), clone v0 + v2,
+  shallow clone, deepen, incremental fetch. The store now holds real trees, so contents,
+  commits and pull diffs all read the same objects git pushed.
+- **GraphQL** (`lib/graphql.ts`): a small parser + typed executor — variables, aliases, inline
+  fragments, input objects, batched operations, Relay global ids (base64 `Type:seq`),
+  `node(id:)`, issues connection with states filter + CREATED_AT order + cursor pagination,
+  the five mutations interoperating with REST, `__type` introspection for the probed types,
+  unknown field → 200 with an `errors` array naming it, unknown repository → null, no errors.
+- **MCP** (`lib/mcp.ts`): `server/discover` (2026-07-28) and legacy `initialize`, the six
+  tools over the shared store via `lib/ops.ts`, a constant tools array (byte-identical
+  tools/list), structuredContent + text results, -32700 with HTTP 400 on unparseable bodies,
+  -32601 unknown method, -32602 unknown tool, notifications → 202.
+- **Domain ops** (`lib/ops.ts`): one implementation of repo/issue/pull JSON and of create /
+  merge for all three surfaces; pull merges are three-way squashes off the base point recorded
+  at creation, with the both-sides-changed-same-path rule answering 405.
+- **REST fixes the suite pinned down**: pull JSON carries current head/base tips and
+  `merged_at`/`merge_commit_sha`; issue/pull `body` is always a string; duplicate repo create
+  is a 422 whose body says "already exists"; pagination Link URLs are absolute on the
+  request's own origin; repositories start with NO labels (the suite creates its fixture
+  label via POST /labels and expects 201 — seeding GitHub's defaults broke every issue
+  check until this was removed).
 
-- **Viewer login**: the trial never hands the forge the viewer's login (the token is an opaque
-  `shpat_…`). The scaffold adopts the first owner login asked about a held repository. Verify
-  against the suite's call order: if GraphQL `viewer{login}` is checked before any repo-scoped
-  path, another channel must exist (inspect a failing practice run's requests).
-- Exact response shapes the checkers require beyond the RULES.txt contract (labels as objects
-  vs names on issues; head/base as `{ref}` objects on pulls) — read failures, adjust.
-- Merge conflict rule: the scaffold squash-merges unconditionally; the suite expects 405 for a
-  conflicted pull. Implement merge-base tracking (record base tip at PR creation; conflict when
-  both sides changed the same path since) once git history exists.
-- Contents on an unborn repository: the REST checks PUT the first commit into a repo with no
-  commits — the scaffold's branch map handles it (branch appears at first commit).
+### Local grade (kit grade-local, process driver, this machine)
+
+| column | score | note |
+| --- | --- | --- |
+| feature | 600/600 | **120/120 conformance checks pass** |
+| agent (MCP) | 200/200 | 15/15 |
+| perf | 181/200 | push 44, clone 43, read 50, write 44 |
+| **total** | **981/1000** | house reference ≈ 900 (120/120 + ~100 perf) |
+
+Workload medians vs the house reference medians (T_ref): push 574 ms vs 1641 ms,
+clone 96 ms vs 267 ms, read 639 ms vs 2760 ms, write 123 ms vs 349 ms — 2.8–4.3× faster
+on every workload, so the margin over the house bar is ~+81 points and does not depend on
+any single workload. Replay determinism: the grade-local cassette/state hashes are stable
+across runs (logical clock everywhere; no wall clock or unseeded randomness in state).
 
 ## Submission hygiene
 
