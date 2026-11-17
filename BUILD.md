@@ -66,6 +66,18 @@ on every workload, so the margin over the house bar is ~+81 points and does not 
 any single workload. Replay determinism: the grade-local cassette/state hashes are stable
 across runs (logical clock everywhere; no wall clock or unseeded randomness in state).
 
+### Perf strike 2 (2026-11-17, local only — NOT submitted)
+
+Dispatch-path trims on top of `01f1ea2`, all semantics-preserving: GET/HEAD requests that
+cannot carry a body skip the `readBody` drain, and a GET cache hit is served before any URL
+parse (the key is built from the raw URL); pkt-line lengths are parsed from bytes instead of
+a string + regex per packet; the pack trailer check compares digests as buffers; `hashObject`
+memoizes its header buffer. Local grade-local (same method, this VM): baseline `01f1ea2`
+985–990 (perf 185–190) vs strike-2 tree 986–989 (perf 186–189) — inside run-to-run noise
+locally, where the workloads are transport-floor bound; the removed work is pure CPU, which
+is the slice the server pod prices ~2–3× higher (it graded `01f1ea2` at perf 137 vs ~190
+local). Feature 600/600 + agent 200/200 in every run. Detail: PERF-STRIKE-2-2026-11-17.md.
+
 ## Submission hygiene
 
 - ≤5 submissions/day, ≤10 total; deadline 2026-11-21 13:30 WIB. Submit only when grade-local

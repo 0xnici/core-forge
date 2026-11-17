@@ -39,6 +39,8 @@ import {
 const JSON_TYPE = 'application/json; charset=utf-8';
 const TOKEN = process.env.MAKEFUN_SHOP_TOKEN ?? '';
 const MAX_BODY = 256 * 1024 * 1024;
+/** The body of a request that cannot carry one (see handle's bodiless fast path). */
+const EMPTY_BODY = Buffer.alloc(0);
 
 export function createApp(): Server {
   const store = new Store();
@@ -137,7 +139,7 @@ export function createApp(): Server {
         }
         chunks.push(chunk);
       });
-      req.on('end', () => resolve(Buffer.concat(chunks)));
+      req.on('end', () => resolve(chunks.length === 1 ? (chunks[0] as Buffer) : Buffer.concat(chunks)));
       req.on('error', reject);
     });
   }
@@ -797,28 +799,48 @@ export function createApp(): Server {
   // the server itself
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const url = new URL(req.url ?? '/', 'http://forge.invalid');
-    const path = url.pathname;
-    if (path === '/healthz') return sendJson(res, 200, { ok: true });
-    const raw = await readBody(req);
+    const method = req.method ?? 'GET';
+    const rawUrl = req.url ?? '/';
+    // /healthz is answered off the raw path when it is already the whole path; a URL that only
+    // parses to /healthz (a query string, a dot segment) is settled by the parsed check on the
+    // miss path below, exactly where it used to be.
+    const queryAt = rawUrl.indexOf('?');
+    if ((queryAt < 0 ? rawUrl : rawUrl.slice(0, queryAt)) === '/healthz') {
+      return sendJson(res, 200, { ok: true });
+    }
+
+    // A GET/HEAD that cannot carry a body (no Transfer-Encoding, no positive Content-Length)
+    // has no stream to drain: routing it without awaiting readBody removes one event-loop turn
+    // from every cached read. Anything that may carry a body is read first, as before — and
+    // still before the auth answer, as before.
+    const bodiless =
+      (method === 'GET' || method === 'HEAD') &&
+      req.headers['transfer-encoding'] === undefined &&
+      (req.headers['content-length'] === undefined || req.headers['content-length'] === '0');
+    const raw = bodiless ? EMPTY_BODY : await readBody(req);
     if (!authorized(req)) return sendJson(res, 401, { message: 'Requires authentication' });
 
     // A mutating request invalidates every cached read response (see the cache note above).
-    const method = req.method ?? 'GET';
     if (method !== 'GET' && method !== 'HEAD') epoch += 1;
 
     if (method === 'GET') {
-      const key = `${epoch}|${viewerLogin ?? ''}|${req.headers.authorization ?? ''}|${req.headers.host ?? ''}|${req.headers['git-protocol'] ?? ''}|${req.url ?? '/'}`;
+      // The cache key is built from the raw URL, so a hit needs no URL parse at all; the parse
+      // (and the routing it feeds) happens only on a miss.
+      const key = `${epoch}|${viewerLogin ?? ''}|${req.headers.authorization ?? ''}|${req.headers.host ?? ''}|${req.headers['git-protocol'] ?? ''}|${rawUrl}`;
       const hit = getCache.get(key);
       if (hit) return replayResponse(res, hit);
+      const url = new URL(rawUrl, 'http://forge.invalid');
+      if (url.pathname === '/healthz') return sendJson(res, 200, { ok: true });
       capture = { map: getCache, key };
       try {
-        return route(req, res, url, path, raw);
+        return route(req, res, url, url.pathname, raw);
       } finally {
         capture = null;
       }
     }
-    return route(req, res, url, path, raw);
+    const url = new URL(rawUrl, 'http://forge.invalid');
+    if (url.pathname === '/healthz') return sendJson(res, 200, { ok: true });
+    return route(req, res, url, url.pathname, raw);
   }
 
   function route(req: IncomingMessage, res: ServerResponse, url: URL, path: string, raw: Buffer): void {

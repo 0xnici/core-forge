@@ -20,9 +20,20 @@ export function isOid(value: string): boolean {
   return HEX40.test(value);
 }
 
+/** The "<type> <len>\0" hash header repeats constantly (every 1 KiB bench blob shares one), so
+ *  the encoded header is memoized per (type, length); the map is small and simply resets. */
+const hashHeaders = new Map<string, Buffer>();
+
 export function hashObject(type: GitObjectType, data: Buffer): string {
+  const key = `${type} ${data.length}`;
+  let header = hashHeaders.get(key);
+  if (header === undefined) {
+    if (hashHeaders.size > 512) hashHeaders.clear();
+    header = Buffer.from(`${key}\0`, 'utf8');
+    hashHeaders.set(key, header);
+  }
   const hash = createHash('sha1');
-  hash.update(Buffer.from(`${type} ${data.length}\0`, 'utf8'));
+  hash.update(header);
   hash.update(data);
   return hash.digest('hex');
 }
@@ -316,9 +327,9 @@ export function readPack(pack: Buffer, resolveBase?: (oid: string) => GitObject 
   if (version !== 2 && version !== 3) throw new Error(`unsupported pack version ${version}`);
   const declaredCount = pack.readUInt32BE(8);
   const trailerStart = pack.length - 20;
-  const trailer = pack.subarray(trailerStart).toString('hex');
-  const computed = createHash('sha1').update(pack.subarray(0, trailerStart)).digest('hex');
-  if (trailer !== computed) throw new Error('pack trailer checksum does not match its bytes');
+  const trailer = pack.subarray(trailerStart);
+  const computed = createHash('sha1').update(pack.subarray(0, trailerStart)).digest();
+  if (!trailer.equals(computed)) throw new Error('pack trailer checksum does not match its bytes');
 
   interface RawEntry {
     offset: number;
@@ -422,7 +433,13 @@ export type PktPacket =
   | { kind: 'delim'; end: number }
   | { kind: 'response-end'; end: number };
 
-const HEX4 = /^[0-9a-fA-F]{4}$/;
+/** The value of one hex digit byte, or -1 when the byte is not hex (either case). */
+function hexValue(byte: number): number {
+  if (byte >= 0x30 && byte <= 0x39) return byte - 0x30; // 0-9
+  if (byte >= 0x61 && byte <= 0x66) return byte - 0x61 + 10; // a-f
+  if (byte >= 0x41 && byte <= 0x46) return byte - 0x41 + 10; // A-F
+  return -1;
+}
 
 /**
  * Decode a pkt-line stream into packets, each with the offset just past it. Decoding stops at the
@@ -433,9 +450,14 @@ export function decodePktLines(bytes: Buffer): PktPacket[] {
   const packets: PktPacket[] = [];
   let offset = 0;
   while (offset + 4 <= bytes.length) {
-    const header = bytes.subarray(offset, offset + 4).toString('ascii');
-    if (!HEX4.test(header)) break;
-    const length = Number.parseInt(header, 16);
+    // The 4-digit hex length is read straight from the bytes: the string form + regex this used
+    // to build per packet cost more than the framing itself on the push/fetch hot paths.
+    const a = hexValue(bytes[offset] as number);
+    const b = hexValue(bytes[offset + 1] as number);
+    const c = hexValue(bytes[offset + 2] as number);
+    const d = hexValue(bytes[offset + 3] as number);
+    if (a < 0 || b < 0 || c < 0 || d < 0) break;
+    const length = (a << 12) | (b << 8) | (c << 4) | d;
     if (length === 0) {
       packets.push({ kind: 'flush', end: offset + 4 });
       offset += 4;
