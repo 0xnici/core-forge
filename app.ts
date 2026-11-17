@@ -9,6 +9,7 @@
 // then on. The git checks address the viewer's repositories first, which settles the login before
 // any surface that cannot carry one (GraphQL `viewer`, MCP) is exercised.
 
+import { createHash } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { isOid, parseCommit } from './lib/git.ts';
 import { advertise, receivePack, uploadPack } from './lib/git-http.ts';
@@ -49,6 +50,41 @@ export function createApp(): Server {
     if (viewerLogin === null && owner !== '') viewerLogin = owner;
   };
 
+  // ----------------------------------------------------------------------------------------------
+  // read-response caches
+  //
+  // Every GET in this API is a pure function of (url, authorization, host, adopted viewer, forge
+  // state), and every state change arrives as a non-GET request. So a GET response may be replayed
+  // byte for byte while no mutating request has been handled since it was produced: `epoch` counts
+  // the mutating requests handled, and it is part of every cache key. The same argument covers
+  // git-upload-pack POSTs (ls-refs / fetch mutate nothing): their responses are a pure function of
+  // the request bytes and the same epoch. receive-pack is never cached — it mutates.
+  //
+  // Handlers run synchronously once the request body is read, so a single capture slot is safe:
+  // while one request is being routed no other request's code can run.
+
+  interface CachedResponse {
+    status: number;
+    headers: Record<string, string | number>;
+    body: Buffer;
+  }
+
+  let epoch = 0;
+  const getCache = new Map<string, CachedResponse>();
+  const uploadPackCache = new Map<string, CachedResponse>();
+  let capture: { map: Map<string, CachedResponse>; key: string } | null = null;
+
+  function recordResponse(map: Map<string, CachedResponse>, key: string, entry: CachedResponse): void {
+    if (map.size > 8192) map.clear();
+    map.set(key, entry);
+  }
+
+  function replayResponse(res: ServerResponse, entry: CachedResponse): void {
+    requestSeq += 1;
+    res.writeHead(entry.status, { ...entry.headers, 'x-github-request-id': `forge-${requestSeq}` });
+    res.end(entry.body);
+  }
+
   function sendJson(
     res: ServerResponse,
     status: number,
@@ -57,27 +93,31 @@ export function createApp(): Server {
   ): void {
     requestSeq += 1;
     const text = body === undefined ? '' : `${JSON.stringify(body)}\n`;
-    res.writeHead(status, {
+    const buf = text ? Buffer.from(text, 'utf8') : Buffer.alloc(0);
+    const fullHeaders: Record<string, string | number> = {
       'content-type': JSON_TYPE,
-      'x-github-request-id': `forge-${requestSeq}`,
-      ...(text ? { 'content-length': Buffer.byteLength(text) } : {}),
+      ...(text ? { 'content-length': buf.length } : {}),
       ...headers,
-    });
-    res.end(text);
+    };
+    if (capture) recordResponse(capture.map, capture.key, { status, headers: fullHeaders, body: buf });
+    res.writeHead(status, { ...fullHeaders, 'x-github-request-id': `forge-${requestSeq}` });
+    res.end(buf);
   }
 
   function sendRaw(res: ServerResponse, status: number, contentType: string, body: Buffer): void {
     requestSeq += 1;
-    res.writeHead(status, {
+    const fullHeaders: Record<string, string | number> = {
       'content-type': contentType,
-      'x-github-request-id': `forge-${requestSeq}`,
       'content-length': body.length,
-    });
+    };
+    if (capture) recordResponse(capture.map, capture.key, { status, headers: fullHeaders, body });
+    res.writeHead(status, { ...fullHeaders, 'x-github-request-id': `forge-${requestSeq}` });
     res.end(body);
   }
 
   function sendEmpty(res: ServerResponse, status: number): void {
     requestSeq += 1;
+    if (capture) recordResponse(capture.map, capture.key, { status, headers: {}, body: Buffer.alloc(0) });
     res.writeHead(status, { 'x-github-request-id': `forge-${requestSeq}` });
     res.end();
   }
@@ -176,7 +216,20 @@ export function createApp(): Server {
       return sendRaw(res, reply.status, reply.contentType, reply.body);
     }
     if (req.method !== 'POST') return notFound(res);
-    const reply = route === 'git-upload-pack' ? uploadPack(repo, raw) : receivePack(repo, raw);
+    if (route === 'git-upload-pack') {
+      // A pure function of the request bytes and the forge state (the epoch): replay it.
+      const key = `${repoName}|${epoch}|${createHash('sha1').update(raw).digest('hex')}`;
+      const hit = uploadPackCache.get(key);
+      if (hit) return replayResponse(res, hit);
+      capture = { map: uploadPackCache, key };
+      try {
+        const reply = uploadPack(repo, raw);
+        return sendRaw(res, reply.status, reply.contentType, reply.body);
+      } finally {
+        capture = null;
+      }
+    }
+    const reply = receivePack(repo, raw);
     return sendRaw(res, reply.status, reply.contentType, reply.body);
   }
 
@@ -750,6 +803,25 @@ export function createApp(): Server {
     const raw = await readBody(req);
     if (!authorized(req)) return sendJson(res, 401, { message: 'Requires authentication' });
 
+    // A mutating request invalidates every cached read response (see the cache note above).
+    const method = req.method ?? 'GET';
+    if (method !== 'GET' && method !== 'HEAD') epoch += 1;
+
+    if (method === 'GET') {
+      const key = `${epoch}|${viewerLogin ?? ''}|${req.headers.authorization ?? ''}|${req.headers.host ?? ''}|${req.headers['git-protocol'] ?? ''}|${req.url ?? '/'}`;
+      const hit = getCache.get(key);
+      if (hit) return replayResponse(res, hit);
+      capture = { map: getCache, key };
+      try {
+        return route(req, res, url, path, raw);
+      } finally {
+        capture = null;
+      }
+    }
+    return route(req, res, url, path, raw);
+  }
+
+  function route(req: IncomingMessage, res: ServerResponse, url: URL, path: string, raw: Buffer): void {
     const gitMatch = path.match(/^\/([^/]+)\/([^/]+)\.git\/(info\/refs|git-upload-pack|git-receive-pack)$/);
     if (gitMatch) return handleGit(req, res, url, raw, gitMatch);
 

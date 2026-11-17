@@ -76,7 +76,13 @@ across runs (logical clock everywhere; no wall clock or unseeded randomness in s
   aggregator entry was refused once for exactly this; it does not consume quota, but do it
   first anyway).
 
-## Submission status (2026-11-16 ~06:35 WIB) — NOT YET SUBMITTED, packaging gates remain
+## Submission status — ✅ SUBMITTED 2026-11-16 (server receipt 2026-11-15T23:17:31.965Z)
+
+- **Submission id: `01a1e180-6ac4-76c6-ac5a-379a244c9b19` · Claim code: `AF-NKGCH-GEYC2-DFZ8S-CV3BE`**
+- Submitted commit: `773f7374b14327cf8f667add0bc0cbeedcf34332` (HEAD of `main`), title "core-forge — full git forge: smart-HTTP, REST, GraphQL, MCP (local grade 981–984 vs house ≈900)". Entry unsigned (prizes not escrowed for this competition). Quota used: **1 of 10**.
+- Packaging gates cleared by follow-up subagent 533fc16c: PLACEHOLDER §1 SELECT re-run for d3f9c810…/337405f6…/e78cbf96… and merged into `forge-usage.jsonl` (226 rows); `main.ts` rewritten byte-identical in the bundled finisher session (sha256 `a18dcc32…` unchanged, tree clean); bundle rebuilt from that session (11 sessions, 6 usage rows attached). Final `makefun check`: **16 passed, 0 failed** — thinking_priced PASS, thinking_reproduces PASS (85.2%; main.ts 3 authored lines).
+
+### Historical note (pre-submission state, 2026-11-16 ~06:35 WIB)
 
 - Code state: commit `0727c04` (this BUILD.md update rides one commit on top; submit the
   HEAD of `main` on https://github.com/Dimzy14/core-forge). Quota used: **0 of 10**.

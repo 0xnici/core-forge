@@ -200,6 +200,27 @@ function readOfsDeltaBase(buffer: Buffer, start: number): { baseOffset: number; 
  */
 function inflateAt(buffer: Buffer, offset: number, expectedSize: number): { data: Buffer; next: number } {
   const available = buffer.length - offset;
+  // Fast path: one inflate over the remaining bytes. zlib stops at the end of the first stream,
+  // and with { info: true } the engine reports exactly how many input bytes that stream consumed,
+  // which is where the next pack entry begins. Any doubt (no count, wrong size) falls back to the
+  // search below, so a runtime that does not report consumption behaves exactly as before.
+  try {
+    const result = inflateSync(buffer.subarray(offset), { info: true }) as unknown as {
+      buffer: Buffer;
+      engine?: { bytesWritten?: number };
+    };
+    const consumed = result.engine?.bytesWritten;
+    if (
+      result.buffer.length === expectedSize &&
+      typeof consumed === 'number' &&
+      consumed > 0 &&
+      consumed <= available
+    ) {
+      return { data: result.buffer, next: offset + consumed };
+    }
+  } catch {
+    // A truncated or corrupt stream throws here just as it does in the search: fall through.
+  }
   const tryLength = (length: number): Buffer | null => {
     try {
       const data = inflateSync(buffer.subarray(offset, offset + length));
